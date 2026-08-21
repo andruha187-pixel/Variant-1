@@ -16,7 +16,7 @@ load_dotenv()
 # PAPER-first production-like simulator for Polymarket BTC 5m
 # ============================================================
 
-VERSION = "2.2-paper-conf60-binance-split"
+VERSION = "2.3-paper-exact-v2-conf60"
 HOST = "https://clob.polymarket.com"
 GAMMA = "https://gamma-api.polymarket.com"
 POLY_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -55,10 +55,13 @@ MOMENTUM_CAP = float(os.getenv("MOMENTUM_CAP", "0.30"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.08"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "0.95"))
 
-# Binance CONF60 - exact scoring weights/thresholds from the V4.2 research bot.
+# Binance CONF60 - exact V2 research scoring/feed.
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt").lower()
-BINANCE_TRADE_WS = f"wss://fstream.binance.com/ws/{BINANCE_SYMBOL}@aggTrade"
-BINANCE_DEPTH_WS = f"wss://fstream.binance.com/ws/{BINANCE_SYMBOL}@depth20@100ms"
+BINANCE_WS = (
+    "wss://fstream.binance.com/market/stream?streams="
+    f"{BINANCE_SYMBOL}@aggTrade/"
+    f"{BINANCE_SYMBOL}@depth20@100ms"
+)
 BINANCE_LARGE_TRADE_USD = float(os.getenv("BINANCE_LARGE_TRADE_USD", "50000"))
 BINANCE_SIGNAL_MAX_AGE_MS = int(os.getenv("BINANCE_SIGNAL_MAX_AGE_MS", "1500"))
 REGIME_WINDOW_SEC = int(os.getenv("REGIME_WINDOW_SEC", "30"))
@@ -71,8 +74,7 @@ W_LARGE = float(os.getenv("W_LARGE", "8"))
 W_TREND = float(os.getenv("W_TREND", "14"))
 W_DISTANCE = float(os.getenv("W_DISTANCE", "18"))
 W_POLY_PRICE = float(os.getenv("W_POLY_PRICE", "6"))
-# Our prior CONF60 comparison intentionally excluded book weight.
-CONF_USE_BOOK = os.getenv("CONF_USE_BOOK", "0").strip() == "1"
+# Exact old V2 CONF60 always includes book imbalance with W_BOOK.
 
 # Live is deliberately OFF by default. UI cannot turn it on unless env allows it.
 ENABLE_LIVE = os.getenv("ENABLE_LIVE", "0").strip() == "1"
@@ -482,8 +484,7 @@ def confidence_from_features(outcome,poly_ask,f):
     elif f["regime"]=="MIXED":trend*=.55
     dist=max(-1,min(1,direction*(f["distance_from_start_pct"]/.0015)))
     poly=0 if poly_ask is None else max(-1,min(1,(.72-float(poly_ask))/.22))
-    bw=W_BOOK if CONF_USE_BOOK else 0
-    weighted=W_IMPULSE*impulse+W_FLOW*flow+bw*book+W_LARGE*large+W_TREND*trend+W_DISTANCE*dist+W_POLY_PRICE*poly
+    weighted=W_IMPULSE*impulse+W_FLOW*flow+W_BOOK*book+W_LARGE*large+W_TREND*trend+W_DISTANCE*dist+W_POLY_PRICE*poly
     return max(0,min(100,50+weighted/2))
 
 def binance_snapshot(cid,m,outcome,poly_ask):
@@ -500,124 +501,57 @@ def binance_snapshot(cid,m,outcome,poly_ask):
     f["confidence"]=confidence_from_features(outcome,poly_ask,f)
     return f
 
-async def binance_trade_ws_loop():
+async def binance_ws_loop():
     """
-    Dedicated Futures aggTrade socket.
+    Exact old V2 combined Binance Futures feed: aggTrade + depth20@100ms.
 
-    We intentionally keep aggTrade on its own connection because the previous
-    combined-stream connection was receiving depth updates but zero trades on
-    Render. CONF freshness is based ONLY on this stream.
+    One intentional safety fix versus old V2: CONF freshness is measured from
+    the last valid aggTrade only. Depth messages never refresh trade freshness.
     """
-    global binance_last_event_ms, binance_last_trade_ms
-
-    while True:
-        try:
-            async with websockets.connect(
-                BINANCE_TRADE_WS,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=5,
-                max_size=2_000_000,
-            ) as ws:
-                log.info("BINANCE TRADE WS connected | %s", BINANCE_SYMBOL.upper())
-                connected_ms = now_ms()
-                last_diag_ms = 0
-                received = 0
-
-                async for raw in ws:
-                    recv_ms = now_ms()
-                    data = json.loads(raw)
-                    payload = data.get("data", data)
-
-                    event = str(payload.get("e") or "")
-                    if event != "aggTrade":
-                        # Direct /ws stream should be aggTrade only.
-                        continue
-
-                    ts = si(payload.get("T") or payload.get("E") or recv_ms)
-                    px = sf(payload.get("p"))
-                    qty = sf(payload.get("q"))
-
-                    if px <= 0 or qty <= 0:
-                        continue
-
-                    quote = px * qty
-                    sign = -1 if bool(payload.get("m")) else 1
-
-                    binance_trades.append((ts, px, quote, sign))
-                    binance_tick_prices.append((ts, px))
-                    binance_last_trade_ms = recv_ms
-                    binance_last_event_ms = recv_ms
-                    received += 1
-
-                    sec = ts // 1000
-                    if binance_second_prices and binance_second_prices[-1][0] == sec:
-                        binance_second_prices[-1] = (sec, px)
-                    else:
-                        binance_second_prices.append((sec, px))
-
-                    if recv_ms - last_diag_ms >= 30000:
-                        reg = _regime_features(REGIME_WINDOW_SEC)
-                        log.info(
-                            "BINANCE DATA | source=FUTURES_AGGTRADE | price=%.2f | "
-                            "ticks=%d | trades=%d | trade_age=%dms | regime=%s | "
-                            "dirchg=%s | path=%.3f",
-                            px,
-                            len(binance_tick_prices),
-                            len(binance_trades),
-                            max(0, recv_ms - binance_last_trade_ms),
-                            reg["regime"],
-                            reg["direction_changes"],
-                            reg["path_efficiency"],
-                        )
-                        last_diag_ms = recv_ms
-
-                    # A healthy BTCUSDT aggTrade socket should be very active.
-                    # If the connection is open but delivers no valid trades,
-                    # force a fresh socket.
-                    if recv_ms - connected_ms > BINANCE_NO_TRADE_RECONNECT_MS and received == 0:
-                        log.warning("BINANCE TRADE WS connected but no aggTrade payloads -> reconnect")
-                        break
-
-        except Exception as e:
-            log.warning("BINANCE TRADE WS reconnect: %s", e)
-
-        await asyncio.sleep(1)
-
-
-async def binance_depth_ws_loop():
-    """Dedicated Futures partial-book socket used only for order-book imbalance."""
     global binance_depth_bids, binance_depth_asks
-    global binance_last_event_ms, binance_last_depth_ms
+    global binance_last_event_ms, binance_last_trade_ms, binance_last_depth_ms
 
     while True:
         try:
             async with websockets.connect(
-                BINANCE_DEPTH_WS,
+                BINANCE_WS,
                 ping_interval=20,
                 ping_timeout=20,
                 close_timeout=5,
-                max_size=2_000_000,
+                max_size=10_000_000,
             ) as ws:
-                log.info("BINANCE DEPTH WS connected | %s", BINANCE_SYMBOL.upper())
-
+                log.info("BINANCE V2 WS connected | %s", BINANCE_SYMBOL.upper())
                 async for raw in ws:
                     recv_ms = now_ms()
                     data = json.loads(raw)
                     payload = data.get("data", data)
+                    stream = str(data.get("stream", ""))
+                    binance_last_event_ms = recv_ms
 
-                    bids = payload.get("b") or payload.get("bids") or []
-                    asks = payload.get("a") or payload.get("asks") or []
+                    if "aggtrade" in stream.lower() or payload.get("e") == "aggTrade":
+                        ts = si(payload.get("T") or payload.get("E") or recv_ms)
+                        price = sf(payload.get("p"))
+                        qty = sf(payload.get("q"))
+                        if price <= 0 or qty <= 0:
+                            continue
+                        quote = price * qty
+                        sign = -1 if bool(payload.get("m")) else 1
+                        binance_trades.append((ts, price, quote, sign))
+                        binance_tick_prices.append((ts, price))
+                        binance_last_trade_ms = recv_ms
+                        sec = ts // 1000
+                        if binance_second_prices and binance_second_prices[-1][0] == sec:
+                            binance_second_prices[-1] = (sec, price)
+                        else:
+                            binance_second_prices.append((sec, price))
 
-                    if bids or asks:
-                        binance_depth_bids = bids
-                        binance_depth_asks = asks
+                    elif "depth" in stream.lower():
+                        binance_depth_bids = payload.get("b") or payload.get("bids") or []
+                        binance_depth_asks = payload.get("a") or payload.get("asks") or []
                         binance_last_depth_ms = recv_ms
-                        binance_last_event_ms = recv_ms
 
         except Exception as e:
-            log.warning("BINANCE DEPTH WS reconnect: %s", e)
-
+            log.warning("BINANCE V2 WS reconnect: %s", e)
         await asyncio.sleep(1)
 
 
@@ -995,10 +929,10 @@ async def web_server():
 async def main():
     global session
     init_db()
-    session=aiohttp.ClientSession(headers={"User-Agent":"M03CONF60Bot/2.0","Accept":"application/json"})
+    session=aiohttp.ClientSession(headers={"User-Agent":"M03CONF60Bot/2.3","Accept":"application/json"})
     tasks=[asyncio.create_task(x()) for x in (
         web_server, discovery_loop, poly_ws_loop,
-        binance_trade_ws_loop, binance_depth_ws_loop, binance_watchdog_loop,
+        binance_ws_loop, binance_watchdog_loop,
         strategy_loop, resolution_loop, telegram_loop, cleanup_loop
     )]
     log.info("%s started | PAPER=$%.2f | lot=%.1f | CONF>=%.1f",VERSION,paper_cash(),ORDER_SIZE,CONF_MIN)

@@ -1,3 +1,16 @@
+# M03 CONF60 Bot V2.3
+
+This build restores the exact old V2 research logic used for the selected `M03_V2_LOCK + CONF60` result, while keeping the newer PAPER/LIVE execution shell.
+
+## V2.3 changes
+
+- Exact `M03_V2_LOCK`: entry move 0.03, pyramid 0.08, lookback 2, max 6 buys/side, entry price 0.55-0.75, momentum cap 0.30, no switch.
+- Exact old V2 CONF60 scoring: book imbalance is included with `W_BOOK=14`.
+- Exact old V2 combined Binance Futures stream: `aggTrade + depth20@100ms` via `/market/stream?streams=...`.
+- Safety correction: Binance freshness (`data_age_ms`) is updated only by a valid real `aggTrade`; depth cannot make stale trade data look fresh.
+- PAPER account remains $500 by default.
+- LIVE remains locked unless `ENABLE_LIVE=1` and credentials are configured. Telegram cannot bypass the environment lock.
+
 # M03_V2_LOCK + Binance CONF60
 
 Standalone PAPER-first Polymarket BTC 5-minute bot.
