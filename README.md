@@ -33,3 +33,7 @@ LIVE requires the Polymarket wallet/funder address and API credentials. The bot 
 switching Telegram to LIVE automatically leaves trading STOPPED; START must be pressed separately.
 
 Important: verify the installed `py-clob-client-v2` API against the current official Polymarket docs before first real-money order.
+
+
+## v2.2 Binance feed fix
+Futures aggTrade and depth run on separate WebSocket connections. CONF freshness uses only aggTrade.
