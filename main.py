@@ -16,7 +16,7 @@ load_dotenv()
 # PAPER-first production-like simulator for Polymarket BTC 5m
 # ============================================================
 
-VERSION = "2.0-paper-conf60"
+VERSION = "2.1-paper-conf60-feedfix"
 HOST = "https://clob.polymarket.com"
 GAMMA = "https://gamma-api.polymarket.com"
 POLY_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -107,6 +107,10 @@ binance_second_prices = deque(maxlen=600)  # sec, price
 binance_depth_bids = []
 binance_depth_asks = []
 binance_last_event_ms = 0
+binance_last_trade_ms = 0
+binance_last_depth_ms = 0
+BINANCE_NO_TRADE_RECONNECT_MS = int(os.getenv("BINANCE_NO_TRADE_RECONNECT_MS", "5000"))
+MEMORY_KEEP_RESOLVED_SEC = int(os.getenv("MEMORY_KEEP_RESOLVED_SEC", "900"))
 
 # ============================================================
 # Helpers / DB
@@ -494,31 +498,144 @@ def binance_snapshot(cid,m,outcome,poly_ask):
       flow_1s=_signed_flow(1),flow_3s=_signed_flow(3),flow_10s=_signed_flow(10),flow_30s=_signed_flow(30),
       book_imbalance=_book_imbalance(),large_delta_10s=_large_delta(10),large_delta_30s=_large_delta(30),
       ema9=e9,ema21=e21,ema_bias=eb,rsi14=_rsi(prices,14) if prices else None,
-      data_age_ms=max(0,now_ms()-binance_last_event_ms) if binance_last_event_ms else 999999,**reg)
+      data_age_ms=max(0,now_ms()-binance_last_trade_ms) if binance_last_trade_ms else 999999,**reg)
     f["confidence"]=confidence_from_features(outcome,poly_ask,f)
     return f
 
 async def binance_ws_loop():
-    global binance_depth_bids,binance_depth_asks,binance_last_event_ms
+    global binance_depth_bids, binance_depth_asks
+    global binance_last_event_ms, binance_last_trade_ms, binance_last_depth_ms
+
     while True:
         try:
-            async with websockets.connect(BINANCE_WS,ping_interval=20,ping_timeout=20,close_timeout=5,max_size=4_000_000) as ws:
-                log.info("BINANCE WS connected | %s",BINANCE_SYMBOL.upper())
+            async with websockets.connect(
+                BINANCE_WS,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=5,
+                max_size=4_000_000,
+            ) as ws:
+                log.info("BINANCE WS connected | %s", BINANCE_SYMBOL.upper())
+                connected_ms = now_ms()
+                last_diag_ms = 0
+
                 async for raw in ws:
-                    d=json.loads(raw); p=d.get("data",d); stream=str(d.get("stream",""))
-                    binance_last_event_ms=now_ms()
-                    if "aggtrade" in stream.lower() or p.get("e")=="aggTrade":
-                        ts=si(p.get("T") or p.get("E") or now_ms()); px=sf(p.get("p")); qty=sf(p.get("q")); quote=px*qty
-                        sign=-1 if bool(p.get("m")) else 1
-                        binance_trades.append((ts,px,quote,sign)); binance_tick_prices.append((ts,px))
-                        sec=ts//1000
-                        if binance_second_prices and binance_second_prices[-1][0]==sec:binance_second_prices[-1]=(sec,px)
-                        else:binance_second_prices.append((sec,px))
+                    d = json.loads(raw)
+                    p = d.get("data", d)
+                    stream = str(d.get("stream", ""))
+                    recv_ms = now_ms()
+                    binance_last_event_ms = recv_ms
+
+                    if "aggtrade" in stream.lower() or p.get("e") == "aggTrade":
+                        ts = si(p.get("T") or p.get("E") or recv_ms)
+                        px = sf(p.get("p"))
+                        qty = sf(p.get("q"))
+
+                        if px <= 0 or qty <= 0:
+                            continue
+
+                        quote = px * qty
+                        sign = -1 if bool(p.get("m")) else 1
+
+                        binance_trades.append((ts, px, quote, sign))
+                        binance_tick_prices.append((ts, px))
+                        binance_last_trade_ms = recv_ms
+
+                        sec = ts // 1000
+                        if binance_second_prices and binance_second_prices[-1][0] == sec:
+                            binance_second_prices[-1] = (sec, px)
+                        else:
+                            binance_second_prices.append((sec, px))
+
                     elif "depth" in stream.lower():
-                        binance_depth_bids=p.get("b") or p.get("bids") or []
-                        binance_depth_asks=p.get("a") or p.get("asks") or []
+                        binance_depth_bids = p.get("b") or p.get("bids") or []
+                        binance_depth_asks = p.get("a") or p.get("asks") or []
+                        binance_last_depth_ms = recv_ms
+
+                    # Diagnostic every 30 sec so Render proves that price history is alive.
+                    if recv_ms - last_diag_ms >= 30000:
+                        age = recv_ms - binance_last_trade_ms if binance_last_trade_ms else None
+                        reg = _regime_features(REGIME_WINDOW_SEC)
+                        log.info(
+                            "BINANCE DATA | price=%s | ticks=%d | trades=%d | "
+                            "trade_age=%sms | regime=%s | dirchg=%s | path=%.3f",
+                            f"{_latest_btc_price():.2f}" if _latest_btc_price() else "NONE",
+                            len(binance_tick_prices),
+                            len(binance_trades),
+                            age if age is not None else "NONE",
+                            reg["regime"],
+                            reg["direction_changes"],
+                            reg["path_efficiency"],
+                        )
+                        last_diag_ms = recv_ms
+
+                    # Depth may continue while aggTrade stream is dead.
+                    # Do not let that falsely mark Binance as fresh.
+                    if recv_ms - connected_ms > BINANCE_NO_TRADE_RECONNECT_MS:
+                        if not binance_last_trade_ms or recv_ms - binance_last_trade_ms > BINANCE_NO_TRADE_RECONNECT_MS:
+                            log.warning(
+                                "BINANCE no aggTrade for %dms -> reconnect",
+                                recv_ms - binance_last_trade_ms if binance_last_trade_ms else recv_ms - connected_ms,
+                            )
+                            break
+
         except Exception as e:
-            log.warning("BINANCE reconnect: %s",e); await asyncio.sleep(1)
+            log.warning("BINANCE reconnect: %s", e)
+
+        await asyncio.sleep(1)
+
+
+
+# ============================================================
+# Runtime cleanup
+# ============================================================
+
+def cleanup_old_runtime():
+    cutoff = now_ts() - MEMORY_KEEP_RESOLVED_SEC
+    with db() as c:
+        rows = c.execute(
+            "SELECT condition_id,up_asset,down_asset FROM markets "
+            "WHERE resolved=1 AND end_ts<?",
+            (cutoff,),
+        ).fetchall()
+
+    old_cids = {str(r["condition_id"]) for r in rows}
+    if not old_cids:
+        return 0
+
+    for cid in old_cids:
+        markets.pop(cid, None)
+        price_history.pop(cid, None)
+        strategy_state.pop(cid, None)
+        market_binance_start_price.pop(cid, None)
+
+    keep_assets = set()
+    for m in markets.values():
+        if m.get("up_asset"):
+            keep_assets.add(str(m["up_asset"]))
+        if m.get("down_asset"):
+            keep_assets.add(str(m["down_asset"]))
+
+    for asset in list(books):
+        if asset not in keep_assets:
+            books.pop(asset, None)
+
+    subscribed_assets.intersection_update(keep_assets)
+    return len(old_cids)
+
+
+async def cleanup_loop():
+    while True:
+        try:
+            removed = cleanup_old_runtime()
+            if removed:
+                log.info(
+                    "CLEANUP | removed_markets=%d | markets=%d | books=%d | assets=%d",
+                    removed, len(markets), len(books), len(subscribed_assets)
+                )
+        except Exception:
+            log.exception("Cleanup failed")
+        await asyncio.sleep(60)
 
 # ============================================================
 # Strategy / execution
@@ -800,7 +917,10 @@ async def health(request):
     s=account_stats()
     return web.json_response({"ok":True,"version":VERSION,"strategy":"M03_V2_LOCK + Binance CONF60",
       "mode":current_mode(),"trading_enabled":trading_enabled(),"live_env_enabled":ENABLE_LIVE,
-      "paper":s,"markets_tracked":len(markets),"books":len(books),"binance_age_ms":max(0,now_ms()-binance_last_event_ms) if binance_last_event_ms else None,
+      "paper":s,"markets_tracked":len(markets),"books":len(books),
+      "binance_trade_age_ms":max(0,now_ms()-binance_last_trade_ms) if binance_last_trade_ms else None,
+      "binance_ticks":len(binance_tick_prices),"binance_trades":len(binance_trades),
+      "binance_regime":_regime_features(REGIME_WINDOW_SEC).get("regime"),
       "time_utc":utc_iso()})
 
 async def web_server():
@@ -813,7 +933,7 @@ async def main():
     global session
     init_db()
     session=aiohttp.ClientSession(headers={"User-Agent":"M03CONF60Bot/2.0","Accept":"application/json"})
-    tasks=[asyncio.create_task(x()) for x in (web_server,discovery_loop,poly_ws_loop,binance_ws_loop,strategy_loop,resolution_loop,telegram_loop)]
+    tasks=[asyncio.create_task(x()) for x in (web_server,discovery_loop,poly_ws_loop,binance_ws_loop,strategy_loop,resolution_loop,telegram_loop,cleanup_loop)]
     log.info("%s started | PAPER=$%.2f | lot=%.1f | CONF>=%.1f",VERSION,paper_cash(),ORDER_SIZE,CONF_MIN)
     try: await asyncio.gather(*tasks)
     finally:
