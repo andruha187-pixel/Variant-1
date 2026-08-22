@@ -12,11 +12,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# M03_V2_LOCK + BINANCE CONF60
+# M05_P08_L2 + BINANCE CONF60
 # PAPER-first production-like simulator for Polymarket BTC 5m
 # ============================================================
 
-VERSION = "2.3-paper-exact-v2-conf60"
+VERSION = "2.4-paper-m05-p08-l2-conf60"
 HOST = "https://clob.polymarket.com"
 GAMMA = "https://gamma-api.polymarket.com"
 POLY_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -31,7 +31,7 @@ try:
 except Exception:
     DATA_DIR = Path("./data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DB_PATH = DATA_DIR / "m03_conf60.db"
+DB_PATH = DATA_DIR / "m05_p08_l2_conf60.db"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -44,14 +44,12 @@ DECISION_INTERVAL = float(os.getenv("DECISION_INTERVAL", "3"))
 TRADE_WINDOW_SECONDS = int(os.getenv("TRADE_WINDOW_SECONDS", "180"))
 MIN_FREE_CASH = float(os.getenv("MIN_FREE_CASH", "5"))
 
-# Exact M03_V2_LOCK parameters from our previous simulator.
-ENTRY_MOVE = float(os.getenv("ENTRY_MOVE", "0.03"))
+# Exact M05_P08_L2 parameters from the research simulator.
+ENTRY_MOVE = float(os.getenv("ENTRY_MOVE", "0.05"))
 PYRAMID_STEP = float(os.getenv("PYRAMID_STEP", "0.08"))
 LOOKBACK = int(os.getenv("LOOKBACK", "2"))
+SWITCH_MOVE = float(os.getenv("SWITCH_MOVE", "0.05"))
 MAX_BUYS_SIDE = int(os.getenv("MAX_BUYS_SIDE", "6"))
-ENTRY_PRICE_MIN = float(os.getenv("ENTRY_PRICE_MIN", "0.55"))
-ENTRY_PRICE_MAX = float(os.getenv("ENTRY_PRICE_MAX", "0.75"))
-MOMENTUM_CAP = float(os.getenv("MOMENTUM_CAP", "0.30"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.08"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "0.95"))
 
@@ -88,7 +86,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("m03-conf60")
+log = logging.getLogger("m05-p08-l2-conf60")
 
 session: Optional[aiohttp.ClientSession] = None
 
@@ -639,7 +637,7 @@ async def cleanup_loop():
 
 def get_st(cid):
     if cid not in strategy_state:
-        strategy_state[cid]={"buys":defaultdict(int),"last_buy":{},"primary_asset":None}
+        strategy_state[cid]={"buys":defaultdict(int),"last_buy":{},"started_sides":set()}
     return strategy_state[cid]
 
 def momentum_for(cid,a):
@@ -716,13 +714,15 @@ async def evaluate_market(m,elapsed):
         if mom is None:continue
         buys=st["buys"][a]; typ=None
         if buys==0:
-            if st["primary_asset"] is not None: continue  # LOCK: never switch side
-            if ask<ENTRY_PRICE_MIN or ask>ENTRY_PRICE_MAX or mom>MOMENTUM_CAP:continue
-            if mom>=ENTRY_MOVE:typ="ENTRY"
+            # Exact research behavior: first side needs +0.05 move; the opposite
+            # side may later start after its own +0.05 move (SWITCH).
+            threshold=ENTRY_MOVE if not st["started_sides"] else SWITCH_MOVE
+            if mom>=threshold:
+                typ="ENTRY" if not st["started_sides"] else "SWITCH"
         else:
-            if a!=st["primary_asset"] or mom>MOMENTUM_CAP:continue
             last=st["last_buy"].get(a)
-            if last is not None and ask>=last+PYRAMID_STEP and mom>0 and buys<MAX_BUYS_SIDE:typ="PYRAMID"
+            if last is not None and ask>=last+PYRAMID_STEP and mom>0 and buys<MAX_BUYS_SIDE:
+                typ="PYRAMID"
         if typ:
             f=binance_snapshot(cid,m,outcome,ask)
             fresh=f["data_age_ms"]<=BINANCE_SIGNAL_MAX_AGE_MS
@@ -732,12 +732,13 @@ async def evaluate_market(m,elapsed):
             if accepted:candidates.append((f["confidence"],mom,a,outcome,ask,typ))
             else:log.info("BLOCK %s %s | %s",typ,outcome,reason)
     if not candidates:return
-    candidates.sort(reverse=True,key=lambda x:(x[0],x[1]))
+    # CONF60 is the gate; if both sides qualify on the same tick, preserve the
+    # research strategy's stronger-momentum choice (confidence is not a ranker).
+    candidates.sort(reverse=True,key=lambda x:x[1])
     conf,mom,a,outcome,ask,typ=candidates[0]
     ok=await execute(cid,a,outcome,typ)
     if ok:
-        st["buys"][a]+=1; st["last_buy"][a]=ask
-        if typ=="ENTRY":st["primary_asset"]=a
+        st["buys"][a]+=1; st["last_buy"][a]=ask; st["started_sides"].add(a)
 
 async def strategy_loop():
     while True:
@@ -884,7 +885,7 @@ async def handle_tg(text):
         msg="📜 LAST TRADES\n"+("\n".join(f"{r['outcome']} {r['signal_type']} {r['filled_shares']:.2f}sh @ {r['avg_price']:.3f} | ${r['total_cost']:.2f}" for r in rows) if rows else "None")
         await tg_send(msg)
     else:
-        await tg_send("M03_V2_LOCK + Binance CONF60\nUse the buttons below.")
+        await tg_send("M05_P08_L2 + Binance CONF60\nUse the buttons below.")
 
 async def telegram_loop():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -911,7 +912,7 @@ async def telegram_loop():
 
 async def health(request):
     s=account_stats()
-    return web.json_response({"ok":True,"version":VERSION,"strategy":"M03_V2_LOCK + Binance CONF60",
+    return web.json_response({"ok":True,"version":VERSION,"strategy":"M05_P08_L2 + Binance CONF60",
       "mode":current_mode(),"trading_enabled":trading_enabled(),"live_env_enabled":ENABLE_LIVE,
       "paper":s,"markets_tracked":len(markets),"books":len(books),
       "binance_trade_age_ms":max(0,now_ms()-binance_last_trade_ms) if binance_last_trade_ms else None,
@@ -929,7 +930,7 @@ async def web_server():
 async def main():
     global session
     init_db()
-    session=aiohttp.ClientSession(headers={"User-Agent":"M03CONF60Bot/2.3","Accept":"application/json"})
+    session=aiohttp.ClientSession(headers={"User-Agent":"M05P08L2CONF60Bot/2.4","Accept":"application/json"})
     tasks=[asyncio.create_task(x()) for x in (
         web_server, discovery_loop, poly_ws_loop,
         binance_ws_loop, binance_watchdog_loop,
