@@ -1,0 +1,22 @@
+SAFE67 source-ZIP parity check
+========================================================================
+_first_v2_eligible_candidates exact: True
+candidate SHA256 source: 0555e1d69931fd91e5db8c3b7661057d02573d5c7922aa58bcaa1e68f74f6a3e
+candidate SHA256 new:    0555e1d69931fd91e5db8c3b7661057d02573d5c7922aa58bcaa1e68f74f6a3e
+
+evaluate_variant normalized differences allowed:
+  - execute_paper(...) -> execute_order(...)
+  - optional stop guard is now independent of old A/B static stop field
+evaluate_variant normalized exact: True
+evaluate SHA256 source:     29aa33853e9502211d445899d418b210b5b25f88426a05d5644544c44d775fa7
+evaluate SHA256 normalized: 29aa33853e9502211d445899d418b210b5b25f88426a05d5644544c44d775fa7
+
+Core thresholds verified:
+V2 price 0.55..0.75
+V2 momentum 0.03..0.30
+SAFE67 price 0.67..0.75
+SAFE67 momentum 0.05..0.10
+PYRAMID +0.08
+lookback 2 ticks
+max buys 2
+no switch
