@@ -1,22 +1,30 @@
-SAFE67 source-ZIP parity check
-========================================================================
-_first_v2_eligible_candidates exact: True
-candidate SHA256 source: 0555e1d69931fd91e5db8c3b7661057d02573d5c7922aa58bcaa1e68f74f6a3e
-candidate SHA256 new:    0555e1d69931fd91e5db8c3b7661057d02573d5c7922aa58bcaa1e68f74f6a3e
+BNB/ETH G/H PAPER/LIVE parity check
+================================================================================
 
-evaluate_variant normalized differences allowed:
-  - execute_paper(...) -> execute_order(...)
-  - optional stop guard is now independent of old A/B static stop field
-evaluate_variant normalized exact: True
-evaluate SHA256 source:     29aa33853e9502211d445899d418b210b5b25f88426a05d5644544c44d775fa7
-evaluate SHA256 normalized: 29aa33853e9502211d445899d418b210b5b25f88426a05d5644544c44d775fa7
+Source G/H rules preserved:
+- FIRST V2 eligible: price 0.55..0.75, momentum 0.03..0.30, lookback 2 ticks.
+- Consensus source: FIRST V2-eligible vote, NOT SAFE target pass.
+- Target token never confirms itself.
+- One other token counts at most once.
+- Same-cycle votes share one decision timestamp.
+- G: target 0.67..0.70, momentum +0.05..+0.10, >=2 DISTINCT OTHER
+  same-side FIRST-V2 votes in previous 10 sec, one ENTRY, no DCA.
+- H: exact same entry gate as G.
+- H DCA: arm ask <=0.50; no buy on arm tick; later ask 0.30..0.60,
+  rebound +0.05..+0.15, elapsed <=120 sec, one DCA only.
+- No side switching.
+- No strategy stop-loss.
 
-Core thresholds verified:
-V2 price 0.55..0.75
-V2 momentum 0.03..0.30
-SAFE67 price 0.67..0.75
-SAFE67 momentum 0.05..0.10
-PYRAMID +0.08
-lookback 2 ticks
-max buys 2
-no switch
+Trading adaptation:
+- Tradable targets are BNB and ETH only.
+- BTC/XRP/SOL/DOGE/HYPE remain monitor-only consensus sources.
+- Four independent execution modes: BNB-G, BNB-H, ETH-G, ETH-H.
+- Default G ENTRY = 5 shares.
+- Default H ENTRY = 5 shares; H DCA = 5 shares.
+- Sizes are persisted and configurable from Telegram.
+- PAPER/LIVE/OFF is persisted per strategy.
+- LIVE execution uses the original trading bot's guarded signed FAK path.
+- Hourly ZIP reporting remains disabled in the trading build.
+
+Regression result:
+BNB/ETH G/H PAPER/LIVE regression: OK

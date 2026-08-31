@@ -1,133 +1,115 @@
-# SAFE67 Multi-Asset PAPER/LIVE Bot — single strategy + configurable stop
+# BNB + ETH G/H FIRST‑V2 Consensus — PAPER/LIVE
 
-This version removes the old A/B duplication. There is now **one SAFE67 strategy per token**:
+Торговая версия стратегий **G и H**. Реальные и PAPER-сделки открываются **только на BNB и ETH**.
 
-- XRP
-- BNB
-- SOL
-- ETH
-- DOGE
-- HYPE (Hyperliquid)
+При этом бот продолжает наблюдать 7 пятиминутных рынков:
 
-BTC is intentionally excluded.
+`BTC, XRP, BNB, SOL, ETH, DOGE, HYPE`
 
-## Strategy logic
+Это обязательно для исходной логики G/H: целевому BNB или ETH нужны **минимум 2 DISTINCT OTHER токена** с одинаковым FIRST‑V2 направлением за предыдущие 10 секунд. Остальные пять токенов являются только источниками голосов и никогда не открывают позиции.
 
-The signal logic remains the same as the source ZIP:
+## Стратегия G
 
-```text
-V2-eligible:
-price    0.55..0.75
-momentum 0.03..0.30
-lookback 2 ticks
+FIRST‑V2 голос любого наблюдаемого токена:
 
-SAFE67 PASS:
-price    0.67..0.75
-momentum 0.05..0.10
+- price `0.55..0.75`
+- momentum `0.03..0.30`
+- lookback `2` decision ticks
 
-ENTRY
-one PYRAMID after +0.08
-PYRAMID momentum >0 and <=0.30
-max 2 buys
-no side switch
-first 180 seconds only
-3-second signal loop
-no pre-decision REST refresh
-```
+Для BNB/ETH G:
 
-The only execution wrapper change is that a signal is routed to PAPER or LIVE according to that token's mode.
+- target ask `0.67..0.70`
+- target momentum `+0.05..+0.10`
+- минимум `2` других токена
+- то же направление
+- FIRST‑V2 голоса в предыдущие `10 sec`
+- один ENTRY
+- DCA нет
+- stop-loss нет
+- side switching нет
 
-## One mode per token
+Default ENTRY: **5 shares**.
 
-Each token can independently be:
+## Стратегия H
 
-```text
-PAPER
-LIVE
-OFF
-```
+ENTRY полностью совпадает с G.
 
-Examples:
+После фактического ENTRY разрешён один safer reversal DCA:
 
-```text
-MODE XRP PAPER
-MODE ETH LIVE
-MODE DOGE OFF
-```
+1. held-side ask `<= 0.50` при elapsed `<=120 sec` → DCA ARMED;
+2. на tick, где произошло ARM, покупки нет;
+3. на более позднем tick ask должен быть `0.30..0.60`;
+4. rebound momentum должен быть `+0.05..+0.15`;
+5. elapsed `<=120 sec`;
+6. один DCA максимум.
 
-LIVE requires a second confirmation:
+Default: **ENTRY 5 shares + DCA 5 shares**.
+
+## Настройка shares из Telegram
+
+Быстро на весь токен:
 
 ```text
-MODE ETH LIVE
-CONFIRM LIVE ETH
+SIZE BNB 7 7
 ```
 
-The confirmation expires after 60 seconds.
+Это означает:
 
-`LIVE_MASTER_ENABLE=1` must also be set on Render before any real order is allowed.
+- BNB G ENTRY = 7
+- BNB H ENTRY = 7
+- BNB H DCA = 7
 
-## Turn tokens on/off
-
-Independent of mode:
+Отдельно по стратегиям:
 
 ```text
-TOKEN XRP ON
-TOKEN XRP OFF
+SIZE BNB G 7
+SIZE BNB H 7 5
+SIZE ETH G 5
+SIZE ETH H 5 5
 ```
 
-Global `STOP` prevents new ENTRY/PYRAMID actions on all tokens. It does not cancel a stop that has already triggered.
+Размер нельзя менять, пока у конкретной стратегии есть открытая bot-tracked позиция.
 
-## Set share sizes yourself
+## PAPER / LIVE отдельно для G и H
 
-Per token:
+Каждая из четырёх стратегий имеет независимый режим:
 
 ```text
-SIZE XRP 5 10
-SIZE ETH 3 6
-SIZE SOL 2.5 5
+BNB G
+BNB H
+ETH G
+ETH H
 ```
 
-The first number is ENTRY shares, the second is PYRAMID shares.
-
-Sizes cannot be changed while that token has an open bot position.
-
-LIVE orders are signed limit orders converted to **FAK**, so the bot attempts up to the requested share quantity against the visible book and does not intentionally leave an unfilled remainder resting in the order book. The exchange can still reject a size that violates that market's own minimum order size.
-
-## Optional stop-loss — no B variant
-
-Every token starts with:
+Команды:
 
 ```text
-SL OFF
+MODE BNB G PAPER
+MODE BNB G OFF
+MODE BNB G LIVE
+CONFIRM LIVE BNB G
+
+MODE BNB H PAPER
+MODE BNB H LIVE
+CONFIRM LIVE BNB H
 ```
 
-Set any level:
+LIVE требует одновременно:
 
-```text
-SL XRP 0.40
-SL ETH 0.35
-SL SOL 0.30
-```
+1. `LIVE_MASTER_ENABLE=1` в Environment;
+2. готовый Polymarket wallet SDK;
+3. `MODE <TOKEN> <G/H> LIVE`;
+4. `CONFIRM LIVE <TOKEN> <G/H>` в течение 60 секунд.
 
-Disable it:
-
-```text
-SL XRP OFF
-```
-
-To preserve the stop behavior from the last ZIP, an enabled SL is **armed only after the PYRAMID actually fills**. The first ENTRY alone is not stopped.
-
-After it triggers, the bot keeps trying to liquidate the remaining tracked shares. Turning SL OFF after a trigger does not cancel an already-started liquidation.
+**Важно:** если одновременно включить `BNB G = LIVE` и `BNB H = LIVE`, при одном и том же G/H entry-сигнале будут отправлены **два независимых реальных ENTRY**. Это ожидаемое поведение двух стратегий. Если нужна только одна реальная позиция, вторую стратегию оставь PAPER или OFF.
 
 ## Telegram buttons
 
 ```text
 START
 STOP
-TOKENS
 MODES
 SIZES
-STOPLOSS
 BALANCE
 POSITIONS
 STATISTICS
@@ -136,54 +118,22 @@ WALLET
 EMERGENCY STOP
 ```
 
-There are **no hourly ZIP reports** in this build.
+`STOP` / `EMERGENCY STOP` блокирует новые ENTRY/DCA. Стратегия stop-loss не используется.
 
-## Connect your Polymarket wallet
+## LIVE order execution
 
-Do not send your private key in Telegram, chat, GitHub, screenshots, or logs.
+LIVE использует защитный wrapper из торгового бота:
 
-On Render → service → Environment add secrets:
+- `LIVE_MASTER_ENABLE`;
+- отдельный PAPER/LIVE/OFF mode;
+- 60-секундное подтверждение LIVE;
+- fresh-book check перед execution;
+- signed limit order, конвертированный в `FAK`;
+- requested shares — максимальный объём попытки исполнения;
+- при неоднозначной ошибке submission этот market/action становится fail-closed и автоматически повторно не отправляется;
+- режим PAPER↔LIVE нельзя пересечь при открытой позиции этой стратегии.
 
-```text
-POLYMARKET_PRIVATE_KEY=0x...
-POLYMARKET_WALLET_ADDRESS=0x...
-```
-
-`POLYMARKET_PRIVATE_KEY` is the signer private key.
-
-`POLYMARKET_WALLET_ADDRESS` is the Polymarket wallet/deposit wallet that owns the collateral/positions. If your account setup does not require an explicit different wallet, the SDK may derive/use the appropriate wallet from the signer setup; use the WALLET command after deploy to verify what the SDK reports.
-
-Keep:
-
-```text
-LIVE_MASTER_ENABLE=0
-```
-
-for the first deployment.
-
-After deploy press:
-
-```text
-WALLET
-```
-
-Check that:
-
-```text
-SDK: READY
-Wallet: expected address
-Collateral: expected balance
-```
-
-Only then change Render to:
-
-```text
-LIVE_MASTER_ENABLE=1
-```
-
-and redeploy.
-
-Even with master enabled, every token remains PAPER until you explicitly run `MODE TOKEN LIVE` and confirm it.
+Частичный fill возможен, если в видимом стакане недостаточно ликвидности.
 
 ## Render
 
@@ -205,57 +155,41 @@ Persistent disk:
 /var/data
 ```
 
-The bot uses a new database:
+Новая база:
 
 ```text
-/var/data/safe67_multi6_single_paper_live.db
+/var/data/bnb_eth_gh_paper_live.db
 ```
 
-## Real-order safety
+Hourly ZIP reports в этой торговой сборке отключены.
 
-The LIVE path includes several guards:
+## Первый запуск
 
-- LIVE master switch on Render.
-- Per-token PAPER/LIVE/OFF mode.
-- 60-second second confirmation before switching a token to LIVE.
-- Mode cannot cross PAPER↔LIVE while that bot token has an open position.
-- Size cannot change while a token has an open bot position.
-- Before order execution the book is freshness-checked.
-- Real order uses FAK rather than a resting GTC order.
-- If submission becomes ambiguous after a network/API error, the same market/action is fail-closed and not automatically retried, reducing duplicate-order risk.
-- An already-triggered stop continues liquidation even if global trading or the token is turned OFF.
-
-## First real-money test
-
-Use a small size and one token only:
+Сначала оставь:
 
 ```text
-TOKEN XRP ON
-TOKEN BNB OFF
-TOKEN SOL OFF
-TOKEN ETH OFF
-TOKEN DOGE OFF
-TOKEN HYPE OFF
-
-SIZE XRP 5 10
-SL XRP OFF
-MODE XRP LIVE
-CONFIRM LIVE XRP
-START
+LIVE_MASTER_ENABLE=0
 ```
 
-After you verify actual entries/settlement behavior, enable more tokens if desired.
+После deploy нажми `WALLET`. Проверь SDK, wallet и collateral. Потом при необходимости включай master и redeploy.
 
-## Tests
+Для первого реального теста лучше оставить только одну стратегию LIVE, например:
 
 ```text
-python test_live_single.py
+MODE BNB H LIVE
+CONFIRM LIVE BNB H
+```
+
+а остальные держать PAPER/OFF.
+
+## Regression test
+
+```text
+python test_bnb_eth_gh.py
 ```
 
 Expected:
 
 ```text
-SAFE67 SINGLE PAPER/LIVE + CONFIGURABLE SL regression: OK
+BNB/ETH G/H PAPER/LIVE regression: OK
 ```
-
-`strategy_parity_check.txt` verifies that the core SAFE67 signal functions match the source ZIP after normalizing only the execution dispatcher and optional stop guard.
